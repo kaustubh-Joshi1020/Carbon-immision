@@ -1,6 +1,7 @@
 import os
 import datetime
 import sqlite3
+import hashlib
 from typing import List, Optional
 from fastapi import FastAPI, HTTPException, UploadFile, File, Form
 from fastapi.middleware.cors import CORSMiddleware
@@ -27,6 +28,14 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# -------------------------------------------------------------------------
+# Password Hashing Helper
+# -------------------------------------------------------------------------
+def hash_password(password: str) -> str:
+    # Use SHA-256 with a static salt for local auth security
+    salt = "ecolog_secure_salt_98372"
+    return hashlib.sha256((password + salt).encode('utf-8')).hexdigest()
 
 # -------------------------------------------------------------------------
 # Database Manager
@@ -92,6 +101,7 @@ class DatabaseManager:
                 CREATE TABLE IF NOT EXISTS users (
                     id VARCHAR(255) PRIMARY KEY,
                     email VARCHAR(255) NOT NULL UNIQUE,
+                    password_hash VARCHAR(255) NOT NULL,
                     created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
                 );
             """)
@@ -113,6 +123,7 @@ class DatabaseManager:
                 CREATE TABLE IF NOT EXISTS users (
                     id TEXT PRIMARY KEY,
                     email TEXT NOT NULL UNIQUE,
+                    password_hash TEXT NOT NULL,
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                 );
             """)
@@ -128,6 +139,36 @@ class DatabaseManager:
                     logged_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                 );
             """)
+
+        # Self-healing migration: Add password_hash column if it is missing from an older database instance
+        try:
+            if self.db_type == "postgres":
+                cols = self.fetch_all(
+                    "SELECT column_name FROM information_schema.columns WHERE table_name='users' AND column_name='password_hash'"
+                )
+                if not cols:
+                    self.execute_query("ALTER TABLE users ADD COLUMN password_hash VARCHAR(255) NOT NULL DEFAULT ''")
+                    print("Database Migration: Added password_hash column to PostgreSQL users table.")
+            else:
+                cursor = self.conn.cursor()
+                cursor.execute("PRAGMA table_info(users)")
+                cols = [row[1] for row in cursor.fetchall()]
+                if 'password_hash' not in cols:
+                    self.execute_query("ALTER TABLE users ADD COLUMN password_hash TEXT NOT NULL DEFAULT ''")
+                    print("Database Migration: Added password_hash column to SQLite users table.")
+        except Exception as mig_err:
+            print(f"Self-healing database migration warning: {mig_err}")
+        
+        # Delete the default user 'kj@gmail.com' from the DB if it exists
+        try:
+            self.execute_query(
+                f"DELETE FROM users WHERE email = {self.placeholder}",
+                ("kj@gmail.com",)
+            )
+            print("Successfully deleted 'kj@gmail.com' from the database.")
+        except Exception as del_err:
+            print(f"Error deleting 'kj@gmail.com': {del_err}")
+
         print("Database schema successfully initialized.")
 
 db = DatabaseManager()
@@ -137,8 +178,12 @@ def startup_event():
     db.init_db()
 
 # -------------------------------------------------------------------------
-# Pydantic Schemas for Gemini Structured Output
+# Pydantic Schemas for Request & Response
 # -------------------------------------------------------------------------
+class AuthRequest(BaseModel):
+    email: str
+    password: str
+
 class ActivityDetail(BaseModel):
     category: str = Field(
         description="Must be one of: 'transport', 'energy', 'food', 'waste'"
@@ -262,7 +307,52 @@ def query_gemini_api(contents: list) -> ActivityExtractor:
         )
 
 # -------------------------------------------------------------------------
-# API Endpoints
+# Authentication Endpoints
+# -------------------------------------------------------------------------
+@app.post("/api/auth/signup")
+def signup(req: AuthRequest):
+    email = req.email.lower().strip()
+    password = req.password
+    
+    if len(password) < 6:
+        raise HTTPException(status_code=400, detail="Password must be at least 6 characters long.")
+    
+    # Check if user already exists
+    users = db.fetch_all(f"SELECT id FROM users WHERE email = {db.placeholder}", (email,))
+    if users:
+        raise HTTPException(status_code=400, detail="Email is already registered.")
+    
+    user_id = f"usr_{hashlib.md5(email.encode('utf-8')).hexdigest()[:10]}"
+    p_hash = hash_password(password)
+    
+    try:
+        db.execute_query(
+            f"INSERT INTO users (id, email, password_hash) VALUES ({db.placeholder}, {db.placeholder}, {db.placeholder})",
+            (user_id, email, p_hash)
+        )
+        return {"success": True, "user_id": user_id, "email": email}
+    except Exception as e:
+        print(f"Registration failed: {e}")
+        raise HTTPException(status_code=500, detail="Database write error during sign up.")
+
+@app.post("/api/auth/login")
+def login(req: AuthRequest):
+    email = req.email.lower().strip()
+    password = req.password
+    p_hash = hash_password(password)
+    
+    users = db.fetch_all(
+        f"SELECT id, password_hash FROM users WHERE email = {db.placeholder}",
+        (email,)
+    )
+    
+    if not users or users[0]["password_hash"] != p_hash:
+        raise HTTPException(status_code=401, detail="Invalid email or password.")
+        
+    return {"success": True, "user_id": users[0]["id"], "email": email}
+
+# -------------------------------------------------------------------------
+# Activity Log Endpoints
 # -------------------------------------------------------------------------
 class ChatRequest(BaseModel):
     user_id: str
@@ -271,12 +361,6 @@ class ChatRequest(BaseModel):
 
 @app.post("/api/chat")
 async def chat_emission(req: ChatRequest):
-    # Register/Ensure user exists in DB
-    db.execute_query(
-        f"INSERT INTO users (id, email) VALUES ({db.placeholder}, {db.placeholder}) ON CONFLICT(id) DO NOTHING",
-        (req.user_id, req.email)
-    )
-
     # Ask Gemini to extract structured info
     extracted = query_gemini_api([
         "You are a Carbon Emission Extractor agent. Analyze the following text and extract all carbon-emitting activities. "
@@ -319,12 +403,6 @@ async def upload_receipt(
     email: str = Form(...),
     file: UploadFile = File(...)
 ):
-    # Register/Ensure user exists in DB
-    db.execute_query(
-        f"INSERT INTO users (id, email) VALUES ({db.placeholder}, {db.placeholder}) ON CONFLICT(id) DO NOTHING",
-        (user_id, email)
-    )
-
     # Read image bytes
     file_bytes = await file.read()
     
@@ -399,15 +477,13 @@ def get_emissions(user_id: str, range: str = "all_time"):
     try:
         logs = db.fetch_all(query, tuple(params))
         
-        # Serialize datetime fields for JSON compatibility (especially for SQLite which returns strings)
+        # Serialize datetime fields for JSON compatibility
         for log in logs:
             if isinstance(log.get("logged_at"), datetime.datetime):
                 log["logged_at"] = log["logged_at"].isoformat()
             elif isinstance(log.get("co2_emissions_kg"), float) or isinstance(log.get("co2_emissions_kg"), int):
-                # Ensure correct type
                 log["co2_emissions_kg"] = float(log["co2_emissions_kg"])
             else:
-                # Convert Decimals
                 log["co2_emissions_kg"] = float(log["co2_emissions_kg"])
                 
         return logs

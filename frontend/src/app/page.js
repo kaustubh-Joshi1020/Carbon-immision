@@ -2,9 +2,6 @@
 
 import React, { useState, useEffect, useRef } from 'react';
 import { 
-  createClient 
-} from '@supabase/supabase-js';
-import { 
   PieChart, 
   Pie, 
   Cell, 
@@ -26,19 +23,11 @@ import {
   Sparkles,
   LogOut,
   User,
-  Trash
+  Info
 } from 'lucide-react';
 import confetti from 'canvas-confetti';
 
-// Conditionally initialize Supabase client
-const SUPABASE_URL = process.env.NEXT_PUBLIC_SUPABASE_URL || "";
-const SUPABASE_ANON_KEY = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY || "";
 const BACKEND_API_URL = process.env.NEXT_PUBLIC_BACKEND_URL || "http://localhost:8000";
-
-let supabase = null;
-if (SUPABASE_URL && SUPABASE_ANON_KEY) {
-  supabase = createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
-}
 
 export default function Dashboard() {
   // Authentication State
@@ -47,6 +36,7 @@ export default function Dashboard() {
   const [authPassword, setAuthPassword] = useState('');
   const [isSignUp, setIsSignUp] = useState(false);
   const [authLoading, setAuthLoading] = useState(false);
+  const [authError, setAuthError] = useState(null);
 
   // Application State
   const [timeRange, setTimeRange] = useState('all_time');
@@ -76,38 +66,9 @@ export default function Dashboard() {
   // Check Auth on Mount
   useEffect(() => {
     setIsMounted(true);
-    
-    // Check if real Supabase client is initialized
-    if (supabase) {
-      supabase.auth.getSession().then(({ data: { session } }) => {
-        if (session) {
-          setUser({
-            id: session.user.id,
-            email: session.user.email,
-            isSimulated: false
-          });
-        }
-      });
-
-      const { data: { subscription } } = supabase.auth.onAuthStateChange((_event, session) => {
-        if (session) {
-          setUser({
-            id: session.user.id,
-            email: session.user.email,
-            isSimulated: false
-          });
-        } else {
-          setUser(null);
-        }
-      });
-
-      return () => subscription.unsubscribe();
-    } else {
-      // Check for simulated session in LocalStorage
-      const savedUser = localStorage.getItem('ecolog_simulated_user');
-      if (savedUser) {
-        setUser(JSON.parse(savedUser));
-      }
+    const savedUser = localStorage.getItem('ecolog_user');
+    if (savedUser) {
+      setUser(JSON.parse(savedUser));
     }
   }, []);
 
@@ -159,65 +120,64 @@ export default function Dashboard() {
     }
   };
 
-  // Handle Simulated / Supabase Auth
+  // Handle Login & Signup
   const handleAuthSubmit = async (e) => {
     e.preventDefault();
-    if (!authEmail) return;
+    if (!authEmail || !authPassword) return;
 
     setAuthLoading(true);
+    setAuthError(null);
     setApiError(null);
 
-    if (supabase) {
-      try {
-        if (isSignUp) {
-          const { error } = await supabase.auth.signUp({
-            email: authEmail,
-            password: authPassword
-          });
-          if (error) throw error;
-          alert("Sign up successful! Please check your email for verification.");
-        } else {
-          const { error } = await supabase.auth.signInWithPassword({
-            email: authEmail,
-            password: authPassword
-          });
-          if (error) throw error;
-        }
-      } catch (err) {
-        setApiError(err.message);
-      } finally {
-        setAuthLoading(false);
+    const endpoint = isSignUp ? '/api/auth/signup' : '/api/auth/login';
+
+    try {
+      const response = await fetch(`${BACKEND_API_URL}${endpoint}`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({
+          email: authEmail,
+          password: authPassword
+        })
+      });
+
+      const data = await response.json();
+
+      if (!response.ok) {
+        throw new Error(data.detail || "Authentication failed.");
       }
-    } else {
-      // Simulate login for offline developer testing
-      // Hash a dummy user ID based on email name
-      const simulatedUser = {
-        id: `usr_${btoa(authEmail).replace(/=/g, '').slice(0, 10)}`,
-        email: authEmail,
-        isSimulated: true
+
+      const loggedInUser = {
+        id: data.user_id,
+        email: data.email
       };
-      localStorage.setItem('ecolog_simulated_user', JSON.stringify(simulatedUser));
-      setUser(simulatedUser);
-      setAuthLoading(false);
-      
-      // Trigger a confetti success burst on login
+
+      localStorage.setItem('ecolog_user', JSON.stringify(loggedInUser));
+      setUser(loggedInUser);
+
+      // Trigger a confetti success burst on login/signup
       confetti({
         particleCount: 80,
         spread: 60,
         origin: { y: 0.8 }
       });
+    } catch (err) {
+      setAuthError(err.message);
+    } finally {
+      setAuthLoading(false);
     }
   };
 
   // Handle Sign Out
-  const handleSignOut = async () => {
-    if (supabase) {
-      await supabase.auth.signOut();
-    } else {
-      localStorage.removeItem('ecolog_simulated_user');
-      setUser(null);
-    }
+  const handleSignOut = () => {
+    localStorage.removeItem('ecolog_user');
+    setUser(null);
     setEmissions([]);
+    setAuthEmail('');
+    setAuthPassword('');
+    setAuthError(null);
   };
 
   // Send message to AI endpoint
@@ -403,51 +363,51 @@ export default function Dashboard() {
             <div className="auth-logo">EcoLog</div>
           </div>
           <p className="auth-subtitle">
-            {supabase 
-              ? "Sign in using your Supabase account to sync your carbon tracker with the cloud database."
-              : "Welcome! The database configuration is using local SQLite storage. Choose an email to start tracking instantly on your laptop."
+            {isSignUp 
+              ? "Create a new account to begin tracking your daily carbon emission footprint."
+              : "Sign in to access your AI carbon tracking metrics dashboard."
             }
           </p>
+
+          {/* Auth Error Notification */}
+          {authError && (
+            <div className="status-pill" style={{ backgroundColor: 'rgba(239, 68, 68, 0.1)', color: '#ef4444', border: '1px solid rgba(239, 68, 68, 0.2)', width: '100%', padding: '0.6rem', boxSizing: 'border-box' }}>
+              <AlertCircle size={14} style={{ marginRight: '0.4rem' }} />
+              <span>{authError}</span>
+            </div>
+          )}
 
           <form onSubmit={handleAuthSubmit} className="auth-form">
             <input 
               type="email" 
-              placeholder="Email address" 
+              placeholder="Email Address" 
               className="auth-input"
               value={authEmail}
               onChange={(e) => setAuthEmail(e.target.value)}
               required
             />
-            {supabase && (
-              <input 
-                type="password" 
-                placeholder="Password" 
-                className="auth-input"
-                value={authPassword}
-                onChange={(e) => setAuthPassword(e.target.value)}
-                required
-              />
-            )}
+            <input 
+              type="password" 
+              placeholder="Password" 
+              className="auth-input"
+              value={authPassword}
+              onChange={(e) => setAuthPassword(e.target.value)}
+              required
+            />
             
             <button type="submit" className="submit-btn" disabled={authLoading}>
-              {authLoading ? "Authenticating..." : (supabase ? (isSignUp ? "Sign Up" : "Sign In") : "Launch App")}
+              {authLoading ? "Processing..." : (isSignUp ? "Create Account" : "Sign In")}
             </button>
           </form>
 
-          {supabase && (
-            <div className="divider">
-              <span onClick={() => setIsSignUp(!isSignUp)} style={{ cursor: 'pointer', color: '#00f2fe' }}>
-                {isSignUp ? "Already have an account? Sign In" : "Need an account? Sign Up"}
-              </span>
-            </div>
-          )}
+          {/* Toggle login vs signup */}
+          <div className="divider">
+            <span onClick={() => { setIsSignUp(!isSignUp); setAuthError(null); }} style={{ cursor: 'pointer', color: '#00f2fe' }}>
+              {isSignUp ? "Already have an account? Sign In" : "Need a new account? Sign Up"}
+            </span>
+          </div>
 
-          {!supabase && (
-            <div className="status-pill status-loading" style={{ margin: '0.5rem auto' }}>
-              <Clock size={12} />
-              <span>Running in Zero-Config Local Storage Mode</span>
-            </div>
-          )}
+
         </div>
       </div>
     );
@@ -465,7 +425,7 @@ export default function Dashboard() {
         <div style={{ display: 'flex', alignItems: 'center', gap: '1rem' }}>
           <div className="status-pill status-loading" style={{ display: 'flex', alignItems: 'center', gap: '0.4rem' }}>
             <User size={14} />
-            <span>{user.email} {user.isSimulated && "(Local)"}</span>
+            <span>{user.email}</span>
           </div>
 
           <button onClick={handleSignOut} className="auth-btn">

@@ -2,11 +2,11 @@
 -- Compatible with PostgreSQL / Supabase SQL Editor
 
 -- 1. Create Users Table
--- If using Supabase, this table maps user profiles.
--- For local development, user_id can be any unique string (e.g. simulated auth email or UUID).
+-- Now includes password_hash to enable direct, fully functional local login and signup systems.
 CREATE TABLE IF NOT EXISTS users (
     id VARCHAR(255) PRIMARY KEY,
     email VARCHAR(255) NOT NULL UNIQUE,
+    password_hash VARCHAR(255) NOT NULL,
     created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
 );
 
@@ -23,6 +23,6 @@ CREATE TABLE IF NOT EXISTS emissions_log (
     logged_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
 );
 
--- 3. Create Indexes for Optimization (Optional but Recommended)
+-- 3. Create Indexes for Optimization
 CREATE INDEX IF NOT EXISTS idx_emissions_user_id ON emissions_log(user_id);
 CREATE INDEX IF NOT EXISTS idx_emissions_logged_at ON emissions_log(logged_at);
