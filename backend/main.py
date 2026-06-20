@@ -2,6 +2,8 @@ import os
 import datetime
 import sqlite3
 import hashlib
+import secrets
+import hmac
 from typing import List, Optional
 from fastapi import FastAPI, HTTPException, UploadFile, File, Form
 from fastapi.middleware.cors import CORSMiddleware
@@ -30,74 +32,119 @@ app.add_middleware(
 )
 
 # -------------------------------------------------------------------------
-# Password Hashing Helper
+# Cryptographically Secure PBKDF2 Password Hashing
 # -------------------------------------------------------------------------
-def hash_password(password: str) -> str:
-    # Use SHA-256 with a static salt for local auth security
-    salt = "ecolog_secure_salt_98372"
-    return hashlib.sha256((password + salt).encode('utf-8')).hexdigest()
+def hash_password(password: str, salt: Optional[str] = None) -> str:
+    if not salt:
+        # Generate a unique cryptographically secure random salt
+        salt = secrets.token_hex(16)
+    iterations = 100000
+    hash_bytes = hashlib.pbkdf2_hmac(
+        'sha256',
+        password.encode('utf-8'),
+        salt.encode('utf-8'),
+        iterations
+    )
+    hash_hex = hash_bytes.hex()
+    return f"pbkdf2:sha256:{iterations}${salt}${hash_hex}"
+
+def verify_password(password: str, stored_hash: str) -> bool:
+    try:
+        # Fallback for old simple SHA-256 hashes if they exist
+        if not stored_hash.startswith("pbkdf2:sha256:"):
+            old_salt = "ecolog_secure_salt_98372"
+            old_hash = hashlib.sha256((password + old_salt).encode('utf-8')).hexdigest()
+            return hmac.compare_digest(old_hash.encode('utf-8'), stored_hash.encode('utf-8'))
+        
+        parts = stored_hash.split("$")
+        if len(parts) != 3:
+            return False
+        
+        salt = parts[1]
+        new_hash = hash_password(password, salt)
+        # Prevent timing-attack vulnerabilities using constant-time comparison
+        return hmac.compare_digest(new_hash.encode('utf-8'), stored_hash.encode('utf-8'))
+    except Exception:
+        return False
 
 # -------------------------------------------------------------------------
-# Database Manager
+# Thread-Safe Database Manager with PostgreSQL Connection Pooling
 # -------------------------------------------------------------------------
 class DatabaseManager:
     def __init__(self):
         self.db_type = "sqlite"
         self.placeholder = "?"
-        self.conn = None
+        self.pool = None
         self.connect()
 
     def connect(self):
         if DATABASE_URL:
             try:
-                import psycopg2
-                self.conn = psycopg2.connect(DATABASE_URL)
+                from psycopg2.pool import ThreadedConnectionPool
+                # Initialize thread-safe connection pooling
+                self.pool = ThreadedConnectionPool(1, 20, DATABASE_URL)
                 self.db_type = "postgres"
                 self.placeholder = "%s"
-                print("Successfully connected to PostgreSQL database.")
+                print("Successfully created PostgreSQL ThreadedConnectionPool.")
             except Exception as e:
-                print(f"PostgreSQL connection failed: {e}. Falling back to SQLite.")
+                print(f"PostgreSQL connection pool creation failed: {e}. Falling back to SQLite.")
                 self.connect_sqlite()
         else:
             self.connect_sqlite()
 
     def connect_sqlite(self):
-        self.conn = sqlite3.connect("emissions.db", check_same_thread=False)
         self.db_type = "sqlite"
         self.placeholder = "?"
-        print("Connected to local SQLite database: emissions.db")
+        print("Using local thread-safe SQLite connection cycles.")
 
-    def execute_query(self, query: str, params: tuple = ()):
-        cursor = self.conn.cursor()
+    def get_connection(self):
+        if self.db_type == "postgres":
+            if not self.pool:
+                raise Exception("PostgreSQL pool is not initialized.")
+            return self.pool.getconn()
+        else:
+            conn = sqlite3.connect("emissions.db", timeout=30)
+            conn.execute("PRAGMA foreign_keys = ON")
+            return conn
+
+    def release_connection(self, conn):
+        if self.db_type == "postgres":
+            if self.pool and conn:
+                self.pool.putconn(conn)
+        else:
+            if conn:
+                conn.close()
+
+    def execute(self, query: str, params: tuple = ()):
+        conn = self.get_connection()
+        cursor = conn.cursor()
         try:
             cursor.execute(query, params)
-            self.conn.commit()
-            return cursor
-        except (sqlite3.Error, Exception) as e:
-            # Handle potential connection drop for Postgres
-            if self.db_type == "postgres":
-                print("Database query failed, attempting to reconnect...")
-                try:
-                    self.connect()
-                    cursor = self.conn.cursor()
-                    cursor.execute(query, params)
-                    self.conn.commit()
-                    return cursor
-                except Exception as rec_err:
-                    print(f"Reconnection failed: {rec_err}")
-                    raise rec_err
-            else:
-                raise e
+            conn.commit()
+        except Exception as e:
+            conn.rollback()
+            raise e
+        finally:
+            self.release_connection(conn)
 
-    def fetch_all(self, query: str, params: tuple = ()):
-        cursor = self.execute_query(query, params)
-        columns = [col[0] for col in cursor.description]
-        return [dict(zip(columns, row)) for row in cursor.fetchall()]
+    def fetch(self, query: str, params: tuple = ()) -> List[dict]:
+        conn = self.get_connection()
+        cursor = conn.cursor()
+        try:
+            cursor.execute(query, params)
+            if cursor.description is None:
+                return []
+            columns = [col[0] for col in cursor.description]
+            return [dict(zip(columns, row)) for row in cursor.fetchall()]
+        except Exception as e:
+            raise e
+        finally:
+            self.release_connection(conn)
 
     def init_db(self):
         if self.db_type == "postgres":
             # PostgreSQL DDL
-            self.execute_query("""
+            self.execute("""
                 CREATE TABLE IF NOT EXISTS users (
                     id VARCHAR(255) PRIMARY KEY,
                     email VARCHAR(255) NOT NULL UNIQUE,
@@ -105,7 +152,7 @@ class DatabaseManager:
                     created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
                 );
             """)
-            self.execute_query("""
+            self.execute("""
                 CREATE TABLE IF NOT EXISTS emissions_log (
                     id SERIAL PRIMARY KEY,
                     user_id VARCHAR(255) REFERENCES users(id) ON DELETE CASCADE,
@@ -119,7 +166,7 @@ class DatabaseManager:
             """)
         else:
             # SQLite DDL
-            self.execute_query("""
+            self.execute("""
                 CREATE TABLE IF NOT EXISTS users (
                     id TEXT PRIMARY KEY,
                     email TEXT NOT NULL UNIQUE,
@@ -127,7 +174,7 @@ class DatabaseManager:
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                 );
             """)
-            self.execute_query("""
+            self.execute("""
                 CREATE TABLE IF NOT EXISTS emissions_log (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     user_id TEXT REFERENCES users(id) ON DELETE CASCADE,
@@ -140,28 +187,30 @@ class DatabaseManager:
                 );
             """)
 
-        # Self-healing migration: Add password_hash column if it is missing from an older database instance
+        # Self-healing migration: Add password_hash column if it is missing
         try:
             if self.db_type == "postgres":
-                cols = self.fetch_all(
+                cols = self.fetch(
                     "SELECT column_name FROM information_schema.columns WHERE table_name='users' AND column_name='password_hash'"
                 )
                 if not cols:
-                    self.execute_query("ALTER TABLE users ADD COLUMN password_hash VARCHAR(255) NOT NULL DEFAULT ''")
+                    self.execute("ALTER TABLE users ADD COLUMN password_hash VARCHAR(255) NOT NULL DEFAULT ''")
                     print("Database Migration: Added password_hash column to PostgreSQL users table.")
             else:
-                cursor = self.conn.cursor()
+                conn = self.get_connection()
+                cursor = conn.cursor()
                 cursor.execute("PRAGMA table_info(users)")
                 cols = [row[1] for row in cursor.fetchall()]
+                self.release_connection(conn)
                 if 'password_hash' not in cols:
-                    self.execute_query("ALTER TABLE users ADD COLUMN password_hash TEXT NOT NULL DEFAULT ''")
+                    self.execute("ALTER TABLE users ADD COLUMN password_hash TEXT NOT NULL DEFAULT ''")
                     print("Database Migration: Added password_hash column to SQLite users table.")
         except Exception as mig_err:
             print(f"Self-healing database migration warning: {mig_err}")
         
         # Delete the default user 'kj@gmail.com' from the DB if it exists
         try:
-            self.execute_query(
+            self.execute(
                 f"DELETE FROM users WHERE email = {self.placeholder}",
                 ("kj@gmail.com",)
             )
@@ -307,7 +356,7 @@ def query_gemini_api(contents: list) -> ActivityExtractor:
         )
 
 # -------------------------------------------------------------------------
-# Authentication Endpoints
+# Authentication Endpoints (Synchronous for Thread-Pooling Efficiency)
 # -------------------------------------------------------------------------
 @app.post("/api/auth/signup")
 def signup(req: AuthRequest):
@@ -318,7 +367,7 @@ def signup(req: AuthRequest):
         raise HTTPException(status_code=400, detail="Password must be at least 6 characters long.")
     
     # Check if user already exists
-    users = db.fetch_all(f"SELECT id FROM users WHERE email = {db.placeholder}", (email,))
+    users = db.fetch(f"SELECT id FROM users WHERE email = {db.placeholder}", (email,))
     if users:
         raise HTTPException(status_code=400, detail="Email is already registered.")
     
@@ -326,7 +375,7 @@ def signup(req: AuthRequest):
     p_hash = hash_password(password)
     
     try:
-        db.execute_query(
+        db.execute(
             f"INSERT INTO users (id, email, password_hash) VALUES ({db.placeholder}, {db.placeholder}, {db.placeholder})",
             (user_id, email, p_hash)
         )
@@ -339,20 +388,19 @@ def signup(req: AuthRequest):
 def login(req: AuthRequest):
     email = req.email.lower().strip()
     password = req.password
-    p_hash = hash_password(password)
     
-    users = db.fetch_all(
+    users = db.fetch(
         f"SELECT id, password_hash FROM users WHERE email = {db.placeholder}",
         (email,)
     )
     
-    if not users or users[0]["password_hash"] != p_hash:
+    if not users or not verify_password(password, users[0]["password_hash"]):
         raise HTTPException(status_code=401, detail="Invalid email or password.")
         
     return {"success": True, "user_id": users[0]["id"], "email": email}
 
 # -------------------------------------------------------------------------
-# Activity Log Endpoints
+# Activity Log Endpoints (Synchronous for Thread-Pooling Efficiency)
 # -------------------------------------------------------------------------
 class ChatRequest(BaseModel):
     user_id: str
@@ -360,7 +408,7 @@ class ChatRequest(BaseModel):
     text: str
 
 @app.post("/api/chat")
-async def chat_emission(req: ChatRequest):
+def chat_emission(req: ChatRequest):
     # Ask Gemini to extract structured info
     extracted = query_gemini_api([
         "You are a Carbon Emission Extractor agent. Analyze the following text and extract all carbon-emitting activities. "
@@ -376,7 +424,7 @@ async def chat_emission(req: ChatRequest):
         total_co2 += co2_kg
 
         # Insert log into DB
-        db.execute_query(
+        db.execute(
             f"INSERT INTO emissions_log (user_id, category, sub_category, input_value, input_unit, co2_emissions_kg) "
             f"VALUES ({db.placeholder}, {db.placeholder}, {db.placeholder}, {db.placeholder}, {db.placeholder}, {db.placeholder})",
             (req.user_id, act.category, act.sub_category, act.value, act.unit, co2_kg)
@@ -398,13 +446,13 @@ async def chat_emission(req: ChatRequest):
     }
 
 @app.post("/api/upload")
-async def upload_receipt(
+def upload_receipt(
     user_id: str = Form(...),
     email: str = Form(...),
     file: UploadFile = File(...)
 ):
-    # Read image bytes
-    file_bytes = await file.read()
+    # Read image bytes synchronously
+    file_bytes = file.file.read()
     
     # Prepare image part for Gemini API
     image_part = types.Part.from_bytes(
@@ -428,7 +476,7 @@ async def upload_receipt(
         co2_kg = calculate_emissions(act.category, act.sub_category, act.value, act.unit)
         total_co2 += co2_kg
 
-        db.execute_query(
+        db.execute(
             f"INSERT INTO emissions_log (user_id, category, sub_category, input_value, input_unit, co2_emissions_kg) "
             f"VALUES ({db.placeholder}, {db.placeholder}, {db.placeholder}, {db.placeholder}, {db.placeholder}, {db.placeholder})",
             (user_id, act.category, act.sub_category, act.value, act.unit, co2_kg)
@@ -475,16 +523,20 @@ def get_emissions(user_id: str, range: str = "all_time"):
     query = f"SELECT * FROM emissions_log WHERE user_id = {db.placeholder} {date_filter} ORDER BY logged_at DESC"
     
     try:
-        logs = db.fetch_all(query, tuple(params))
+        logs = db.fetch(query, tuple(params))
         
         # Serialize datetime fields for JSON compatibility
         for log in logs:
             if isinstance(log.get("logged_at"), datetime.datetime):
                 log["logged_at"] = log["logged_at"].isoformat()
-            elif isinstance(log.get("co2_emissions_kg"), float) or isinstance(log.get("co2_emissions_kg"), int):
+            elif isinstance(log.get("logged_at"), str):
+                pass
+            
+            # Convert decimal or numeric values to standard floats
+            if log.get("co2_emissions_kg") is not None:
                 log["co2_emissions_kg"] = float(log["co2_emissions_kg"])
-            else:
-                log["co2_emissions_kg"] = float(log["co2_emissions_kg"])
+            if log.get("input_value") is not None:
+                log["input_value"] = float(log["input_value"])
                 
         return logs
     except Exception as e:
@@ -493,7 +545,7 @@ def get_emissions(user_id: str, range: str = "all_time"):
 
 @app.delete("/api/emissions/{log_id}")
 def delete_emission(log_id: int, user_id: str):
-    db.execute_query(
+    db.execute(
         f"DELETE FROM emissions_log WHERE id = {db.placeholder} AND user_id = {db.placeholder}",
         (log_id, user_id)
     )
