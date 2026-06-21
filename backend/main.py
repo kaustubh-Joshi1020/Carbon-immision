@@ -385,27 +385,33 @@ def calculate_baseline_emissions(p: dict) -> float:
 # Dynamic Challenge Suggestions
 # -------------------------------------------------------------------------
 def generate_challenge(category: str) -> dict:
+    category = category.lower().strip()
     challenges = {
         "transport": {
             "text": "Carpool or ride public transit (bus/metro) for your next commute instead of driving a solo vehicle.",
-            "offset_kg": 4.5
+            "offset_kg": 4.5,
+            "category": "transport"
         },
         "energy": {
             "text": "Turn off all standby appliances, chargers, and non-essential lights tonight before going to bed.",
-            "offset_kg": 0.8
+            "offset_kg": 0.8,
+            "category": "energy"
         },
         "food": {
             "text": "Opt for a fully plant-based vegan or vegetarian meal for your next dinner instead of meat/beef.",
-            "offset_kg": 2.2
+            "offset_kg": 2.2,
+            "category": "food"
         },
         "waste": {
             "text": "Segregate all your dry paper/plastics and wet compost organic kitchen waste today.",
-            "offset_kg": 0.5
+            "offset_kg": 0.5,
+            "category": "waste"
         }
     }
-    return challenges.get(category.lower(), {
+    return challenges.get(category, {
         "text": "Walk or bike for short trips under 2 km today instead of taking motorized transport.",
-        "offset_kg": 1.2
+        "offset_kg": 1.2,
+        "category": "transport"
     })
 
 # -------------------------------------------------------------------------
