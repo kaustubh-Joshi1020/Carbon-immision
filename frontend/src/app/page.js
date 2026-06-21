@@ -22,7 +22,13 @@ import {
   Clock,
   Sparkles,
   LogOut,
-  User
+  User,
+  Settings,
+  X,
+  TrendingDown,
+  ShoppingBag,
+  Award,
+  CheckCircle
 } from 'lucide-react';
 import confetti from 'canvas-confetti';
 
@@ -44,12 +50,41 @@ export default function Dashboard() {
   const [apiError, setApiError] = useState(null);
   const [isMounted, setIsMounted] = useState(false);
 
+  // Profile Baseline State
+  const [hasProfile, setHasProfile] = useState(false);
+  const [baselineDailyCO2, setBaselineDailyCO2] = useState(0.0);
+  const [baselineWeeklyCO2, setBaselineWeeklyCO2] = useState(0.0);
+  const [showProfileModal, setShowProfileModal] = useState(false);
+  
+  // Profile Form State
+  const [commuteMode, setCommuteMode] = useState('walking');
+  const [commuteDistance, setCommuteDistance] = useState(0);
+  const [commuteDays, setCommuteDays] = useState(0);
+  const [vehicleFuel, setVehicleFuel] = useState('petrol');
+  const [dietType, setDietType] = useState('vegetarian');
+  const [meatFreq, setMeatFreq] = useState(0);
+  const [cookingFuel, setCookingFuel] = useState('electric_induction');
+  const [householdSize, setHouseholdSize] = useState(1);
+  const [wasteSegregation, setWasteSegregation] = useState(false);
+  const [waterPeopleCount, setWaterPeopleCount] = useState(1);
+  const [waterSource, setWaterSource] = useState('municipal');
+  const [monthlyOnlineOrders, setMonthlyOnlineOrders] = useState(0);
+  const [profileSaving, setProfileSaving] = useState(false);
+
+  // Daily Challenge State
+  const [activeChallenge, setActiveChallenge] = useState({
+    text: "Walk or bike for short trips under 2 km today instead of taking motorized transport.",
+    offset_kg: 1.2,
+    category: "transport"
+  });
+  const [challengeCompleted, setChallengeCompleted] = useState(false);
+
   // Chat State
   const [chatHistory, setChatHistory] = useState([
     {
       id: 1,
       sender: 'assistant',
-      text: "Hello! I am EcoLog AI. Tell me what you did today, e.g., 'I drove 45 km in a diesel car' or 'Cooked 3 vegetarian meals', and I will calculate and log the carbon emissions for you! You can also upload a utility bill or receipt below.",
+      text: "Hello! I am EcoLog AI. Tell me what you did today, e.g., 'I drove 45 km in a diesel car' or 'Cooked 3 vegetarian meals', and I will calculate and log the carbon emissions for you! You can also configure your custom Carbon Baseline Profile using the Settings icon in the header.",
       timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
     }
   ]);
@@ -71,10 +106,11 @@ export default function Dashboard() {
     }
   }, []);
 
-  // Fetch Emissions Log whenever User or timeRange changes
+  // Fetch Emissions & Profile whenever User or timeRange changes
   useEffect(() => {
     if (user) {
       fetchEmissions();
+      fetchProfile();
     }
   }, [user, timeRange]);
 
@@ -99,6 +135,141 @@ export default function Dashboard() {
       setApiError(err.message || "Failed to connect to FastAPI backend. Make sure it is running.");
     } finally {
       setLoading(false);
+    }
+  };
+
+  // Fetch Carbon Profile Baseline details
+  const fetchProfile = async () => {
+    try {
+      const response = await fetch(`${BACKEND_API_URL}/api/profile?user_id=${user.id}`);
+      if (response.ok) {
+        const data = await response.json();
+        setHasProfile(data.has_profile);
+        setBaselineDailyCO2(data.baseline_daily_co2_kg);
+        setBaselineWeeklyCO2(data.baseline_weekly_co2_kg);
+        
+        if (data.has_profile && data.profile) {
+          const p = data.profile;
+          setCommuteMode(p.primary_commute || 'walking');
+          setCommuteDistance(p.commute_distance || 0);
+          setCommuteDays(p.commute_days || 0);
+          setVehicleFuel(p.vehicle_fuel || 'petrol');
+          setDietType(p.diet_type || 'vegetarian');
+          setMeatFreq(p.meat_freq_per_week || 0);
+          setCookingFuel(p.cooking_fuel || 'electric_induction');
+          setHouseholdSize(p.household_size || 1);
+          setWasteSegregation(p.waste_segregation || false);
+          setWaterPeopleCount(p.water_people_count || 1);
+          setWaterSource(p.water_source || 'municipal');
+          setMonthlyOnlineOrders(p.monthly_online_orders || 0);
+        }
+      }
+    } catch (err) {
+      console.error("Error fetching baseline profile:", err);
+    }
+  };
+
+  // Save Carbon Profile Details
+  const handleProfileSubmit = async (e) => {
+    e.preventDefault();
+    setProfileSaving(true);
+    try {
+      const response = await fetch(`${BACKEND_API_URL}/api/profile`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({
+          user_id: user.id,
+          primary_commute: commuteMode,
+          commute_distance: parseFloat(commuteDistance),
+          commute_days: parseFloat(commuteDays),
+          vehicle_fuel: vehicleFuel,
+          diet_type: dietType,
+          meat_freq_per_week: parseFloat(meatFreq),
+          cooking_fuel: cookingFuel,
+          household_size: parseFloat(householdSize),
+          waste_segregation: wasteSegregation,
+          water_people_count: parseFloat(waterPeopleCount),
+          water_source: waterSource,
+          monthly_online_orders: parseFloat(monthlyOnlineOrders)
+        })
+      });
+
+      if (!response.ok) {
+        const errorData = await response.json();
+        throw new Error(errorData.detail || "Failed to save baseline profile.");
+      }
+
+      await fetchProfile();
+      setShowProfileModal(false);
+      
+      confetti({
+        particleCount: 100,
+        spread: 70,
+        colors: ['#00f2fe', '#d946ef'],
+        origin: { y: 0.8 }
+      });
+    } catch (err) {
+      alert("Error saving profile: " + err.message);
+    } finally {
+      setProfileSaving(false);
+    }
+  };
+
+  // Accept and Complete Daily Challenge
+  const handleCompleteChallenge = async () => {
+    if (!activeChallenge || challengeCompleted) return;
+
+    try {
+      const response = await fetch(`${BACKEND_API_URL}/api/challenges/accept`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({
+          user_id: user.id,
+          category: activeChallenge.category,
+          offset_kg: activeChallenge.offset_kg,
+          text: activeChallenge.text
+        })
+      });
+
+      if (!response.ok) {
+        throw new Error("Failed to register completed challenge.");
+      }
+
+      setChallengeCompleted(true);
+      fetchEmissions();
+
+      confetti({
+        particleCount: 150,
+        spread: 90,
+        colors: ['#10b981', '#00f2fe', '#f97316'],
+        origin: { y: 0.8 }
+      });
+
+      // Show congratulations, then rotate to a new standby challenge after 2.5 seconds
+      setTimeout(() => {
+        const standbyChallenges = [
+          { text: "Walk or cycle for short trips under 2 km today instead of driving.", offset_kg: 1.2, category: "transport" },
+          { text: "Turn off all standby appliances, computer monitors, and chargers tonight.", offset_kg: 0.8, category: "energy" },
+          { text: "Opt for a fully plant-based vegan or vegetarian meal for your next dinner.", offset_kg: 2.2, category: "food" },
+          { text: "Segregate your dry recyclable packaging from organic kitchen waste today.", offset_kg: 0.5, category: "waste" },
+          { text: "Take a shorter 5-minute shower today to save water heating energy.", offset_kg: 1.5, category: "energy" },
+          { text: "Avoid ordering online delivery today; buy locally to save transit emissions.", offset_kg: 1.0, category: "transport" }
+        ];
+        
+        // Filter out current challenge to avoid repeating
+        const options = standbyChallenges.filter(c => c.text !== activeChallenge.text);
+        const next = options[Math.floor(Math.random() * options.length)];
+        
+        setActiveChallenge(next);
+        setChallengeCompleted(false);
+      }, 2500);
+
+    } catch (err) {
+      alert("Error recording challenge completion: " + err.message);
     }
   };
 
@@ -176,6 +347,9 @@ export default function Dashboard() {
     setAuthEmail('');
     setAuthPassword('');
     setAuthError(null);
+    setHasProfile(false);
+    setBaselineDailyCO2(0);
+    setBaselineWeeklyCO2(0);
   };
 
   // Send message to AI endpoint
@@ -229,6 +403,12 @@ export default function Dashboard() {
         }
       ]);
 
+      // Set recommended daily challenge returned by AI
+      if (data.daily_challenge) {
+        setActiveChallenge(data.daily_challenge);
+        setChallengeCompleted(false);
+      }
+
       fetchEmissions();
 
       if (data.total_co2_kg > 0) {
@@ -281,8 +461,13 @@ export default function Dashboard() {
       const data = await response.json();
       setUploadStatus({ 
         type: 'success', 
-        message: `Parsed successfully! Logged ${data.total_co2_kg} kg CO2 from receipt/bill.` 
+        message: `Parsed successfully! Logged ${data.total_co2_kg} kg CO2 from receipt.` 
       });
+
+      if (data.daily_challenge) {
+        setActiveChallenge(data.daily_challenge);
+        setChallengeCompleted(false);
+      }
 
       fetchEmissions();
 
@@ -313,14 +498,35 @@ export default function Dashboard() {
     }
   };
 
-  // Deriving Stats
-  const totalCO2 = emissions.reduce((acc, curr) => acc + parseFloat(curr.co2_emissions_kg), 0);
+  // Deriving Stats (Note: challenge offsets are stored as negative numbers, so sum correctly computes net CO2!)
+  const netLoggedEmissions = emissions.reduce((acc, curr) => acc + parseFloat(curr.co2_emissions_kg), 0);
+  
+  // Total calculated emissions = Daily Baseline baseline (in range) + net logged emissions
+  let timeMultiplier = 30; // default for monthly
+  if (timeRange === 'today') timeMultiplier = 1;
+  else if (timeRange === 'weekly') timeMultiplier = 7;
+  else if (timeRange === 'yearly') timeMultiplier = 365;
+  else if (timeRange === 'all_time') timeMultiplier = emissions.length > 0 ? 30 : 0; // fallback to 30 days of baseline
 
+  const totalBaselineContribution = baselineDailyCO2 * timeMultiplier;
+  const totalCombinedCO2 = totalBaselineContribution + netLoggedEmissions;
+
+  // Grouping emissions for PieChart (skipping offsets to keep proportions positive and readable)
   const categoryTotals = emissions.reduce((acc, curr) => {
     const cat = curr.category.toLowerCase();
-    acc[cat] = (acc[cat] || 0) + parseFloat(curr.co2_emissions_kg);
+    if (cat !== 'challenge_offset') {
+      acc[cat] = (acc[cat] || 0) + parseFloat(curr.co2_emissions_kg);
+    }
     return acc;
   }, {});
+
+  // Add baseline food, transport, energy, waste baselines to the proportions for holistic representation
+  if (hasProfile) {
+    categoryTotals['food'] = (categoryTotals['food'] || 0) + (dietType === 'vegan' ? 0.5 : dietType === 'vegetarian' ? 0.8 : dietType === 'eggetarian' ? 1.2 : 1.8) * timeMultiplier;
+    categoryTotals['transport'] = (categoryTotals['transport'] || 0) + (commuteMode === 'car' ? commuteDistance * 2 * commuteDays * (vehicleFuel === 'diesel' ? 0.171 : vehicleFuel === 'ev' ? 0.047 : vehicleFuel === 'cng' ? 0.120 : 0.170) / 7.0 : 0) * timeMultiplier;
+    categoryTotals['energy'] = (categoryTotals['energy'] || 0) + ((cookingFuel === 'lpg' ? 1.5 : cookingFuel === 'png' ? 1.0 : 0.5) / householdSize) * timeMultiplier;
+    categoryTotals['waste'] = (categoryTotals['waste'] || 0) + (wasteSegregation ? 0.1 : 0.3) * timeMultiplier;
+  }
 
   const COLORS = {
     transport: '#00f2fe',
@@ -333,15 +539,16 @@ export default function Dashboard() {
     name: cat.toUpperCase(),
     value: parseFloat(categoryTotals[cat].toFixed(2)),
     color: COLORS[cat] || '#64748b'
-  }));
+  })).filter(d => d.value > 0);
 
-  const activeCategoriesCount = Object.keys(categoryTotals).filter(cat => categoryTotals[cat] > 0).length;
+  const activeCategoriesCount = chartData.length;
 
   const getCategoryIcon = (category) => {
     switch (category.toLowerCase()) {
       case 'transport': return <Car size={16} className="badge-transport" aria-hidden="true" />;
       case 'energy': return <Zap size={16} className="badge-energy" aria-hidden="true" />;
       case 'food': return <Utensils size={16} className="badge-food" aria-hidden="true" />;
+      case 'challenge_offset': return <Award size={16} className="badge-food" aria-hidden="true" />;
       default: return <Leaf size={16} className="badge-waste" aria-hidden="true" />;
     }
   };
@@ -362,7 +569,6 @@ export default function Dashboard() {
             }
           </p>
 
-          {/* Auth Error Notification */}
           {authError && (
             <div className="status-pill" style={{ backgroundColor: 'rgba(239, 68, 68, 0.1)', color: '#ef4444', border: '1px solid rgba(239, 68, 68, 0.2)', width: '100%', padding: '0.6rem', boxSizing: 'border-box' }} role="alert">
               <AlertCircle size={14} style={{ marginRight: '0.4rem' }} aria-hidden="true" />
@@ -402,7 +608,6 @@ export default function Dashboard() {
             </button>
           </form>
 
-          {/* Toggle login vs signup */}
           <div className="divider">
             <span 
               onClick={() => { setIsSignUp(!isSignUp); setAuthError(null); }} 
@@ -426,10 +631,20 @@ export default function Dashboard() {
       <header className="dashboard-header" role="banner">
         <div className="header-title-container">
           <Leaf color="#00f2fe" size={36} aria-hidden="true" />
-          <span className="brand-icon">EcoLog</span>
+          <h1 className="brand-icon">EcoLog</h1>
         </div>
         
         <div style={{ display: 'flex', alignItems: 'center', gap: '1rem' }}>
+          <button 
+            onClick={() => setShowProfileModal(true)} 
+            className="auth-btn" 
+            style={{ borderColor: 'var(--color-transport)' }}
+            aria-label="Open Carbon Profile Baseline settings"
+          >
+            <Settings size={16} aria-hidden="true" />
+            <span>Profile Settings</span>
+          </button>
+
           <div className="status-pill status-loading" style={{ display: 'flex', alignItems: 'center', gap: '0.4rem' }}>
             <span className="sr-only">Logged in as</span>
             <span style={{ fontSize: '0.85rem' }}>{user.email}</span>
@@ -473,26 +688,22 @@ export default function Dashboard() {
 
       {/* Metrics Row */}
       <section className="metrics-row" aria-label="Carbon footprint metrics summary">
-        <article className="metric-card glass-panel" tabIndex={0} aria-label={`Total Carbon dioxide emitted: ${totalCO2.toFixed(1)} kilograms`}>
-          <div className="metric-label">Total CO2 Emitted</div>
-          <div className="metric-value">
-            {totalCO2.toFixed(1)} <span className="metric-unit">kg CO₂</span>
+        <article className="metric-card glass-panel" tabIndex={0} aria-label={`Total Carbon footprint: ${totalCombinedCO2.toFixed(1)} kilograms`}>
+          <div className="metric-label">Total CO₂ Impact</div>
+          <div className="metric-value" style={{ color: totalCombinedCO2 > (10 * timeMultiplier) ? '#ef4444' : '#10b981' }}>
+            {totalCombinedCO2.toFixed(1)} <span className="metric-unit">kg CO₂</span>
           </div>
         </article>
-        <article className="metric-card glass-panel" tabIndex={0} aria-label={`Number of active emission categories: ${activeCategoriesCount}`}>
+        <article className="metric-card glass-panel" tabIndex={0} aria-label={`Daily Baseline Carbon Contribution: ${baselineDailyCO2.toFixed(1)} kilograms`}>
+          <div className="metric-label">Estimated Daily Baseline</div>
+          <div className="metric-value">
+            {baselineDailyCO2.toFixed(1)} <span className="metric-unit">kg/day</span>
+          </div>
+        </article>
+        <article className="metric-card glass-panel" tabIndex={0} aria-label={`Active Categories Count: ${activeCategoriesCount}`}>
           <div className="metric-label">Active Sources</div>
           <div className="metric-value">
             {activeCategoriesCount} <span className="metric-unit">Categories</span>
-          </div>
-        </article>
-        <article className="metric-card glass-panel" tabIndex={0} aria-label={`Most recent logged activity: ${emissions.length > 0 ? emissions[0].sub_category.replace(/_/g, ' ') : 'No logs recorded'}`}>
-          <div className="metric-label">Recent Activity</div>
-          <div className="metric-value" style={{ fontSize: '1.25rem', marginTop: '1rem', fontWeight: 500 }}>
-            {emissions.length > 0 ? (
-              <span style={{ textTransform: 'capitalize' }}>
-                {emissions[0].sub_category.replace(/_/g, ' ')} ({emissions[0].co2_emissions_kg} kg)
-              </span>
-            ) : "No logs recorded"}
           </div>
         </article>
       </section>
@@ -504,7 +715,7 @@ export default function Dashboard() {
           {/* Chart Panel */}
           <article className="chart-panel glass-panel" aria-labelledby="chart-title">
             <div className="chart-header">
-              <h3 id="chart-title">Carbon Emission Proportions</h3>
+              <h3 id="chart-title">Total Footprint Proportions (Baseline + Logs)</h3>
               <Sparkles size={18} color="#d946ef" aria-hidden="true" />
             </div>
 
@@ -541,7 +752,7 @@ export default function Dashboard() {
               </div>
             ) : (
               <div className="chart-container" style={{ color: 'var(--color-text-muted)', fontSize: '0.9rem' }}>
-                Start adding logs using the chat assistant or receipt uploader to populate data.
+                Configure your Carbon Profile or add logs to display footprint breakdowns.
               </div>
             )}
           </article>
@@ -549,7 +760,7 @@ export default function Dashboard() {
           {/* Logs Table */}
           <article className="logs-panel glass-panel" aria-labelledby="logs-table-title">
             <div className="logs-list-header">
-              <h3 id="logs-table-title">Emission Log Files</h3>
+              <h3 id="logs-table-title">Logged Activities</h3>
               <span style={{ fontSize: '0.8rem', color: 'var(--color-text-muted)' }}>
                 {emissions.length} entries total
               </span>
@@ -563,7 +774,7 @@ export default function Dashboard() {
                       <th scope="col">Category</th>
                       <th scope="col">Activity Type</th>
                       <th scope="col">Value Logged</th>
-                      <th scope="col">CO2 Generated</th>
+                      <th scope="col">CO₂ Offset/Load</th>
                       <th scope="col">Logged Date</th>
                       <th scope="col">Actions</th>
                     </tr>
@@ -574,7 +785,7 @@ export default function Dashboard() {
                         <td>
                           <div className={`category-badge badge-${log.category.toLowerCase()}`}>
                             {getCategoryIcon(log.category)}
-                            {log.category}
+                            {log.category.replace(/_/g, ' ')}
                           </div>
                         </td>
                         <td style={{ textTransform: 'capitalize' }}>
@@ -583,7 +794,7 @@ export default function Dashboard() {
                         <td>
                           {log.input_value} {log.input_unit}
                         </td>
-                        <td style={{ fontWeight: 600 }}>
+                        <td style={{ fontWeight: 600, color: parseFloat(log.co2_emissions_kg) < 0 ? '#10b981' : '#f8fafc' }}>
                           {log.co2_emissions_kg} kg
                         </td>
                         <td>
@@ -599,7 +810,7 @@ export default function Dashboard() {
                             onClick={() => handleDeleteLog(log.id)} 
                             className="delete-btn" 
                             title="Delete log record"
-                            aria-label={`Delete emission entry for ${log.sub_category.replace(/_/g, ' ')}`}
+                            aria-label={`Delete entry for ${log.sub_category.replace(/_/g, ' ')}`}
                           >
                             <Trash2 size={16} aria-hidden="true" />
                           </button>
@@ -610,15 +821,60 @@ export default function Dashboard() {
                 </table>
               ) : (
                 <div style={{ padding: '2rem', textAlign: 'center', color: 'var(--color-text-muted)', fontSize: '0.9rem' }}>
-                  No activities logged in this time range.
+                  No activities manually logged in this time range.
                 </div>
               )}
             </div>
           </article>
         </section>
 
-        {/* Right Side (AI Chat & File Uploader) */}
+        {/* Right Side (AI Chat, Challenge, File Uploader) */}
         <aside className="side-column" aria-label="AI Assist and Automated parsing tools">
+          {/* Daily Challenge Card (Gamified Carbon offset feature) */}
+          {activeChallenge && (
+            <article className="glass-panel" style={{ padding: '1.5rem', border: challengeCompleted ? '1px solid rgba(16, 185, 129, 0.4)' : '1px solid rgba(0, 242, 254, 0.25)', position: 'relative', overflow: 'hidden' }} aria-labelledby="challenge-title">
+              <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', marginBottom: '0.75rem' }}>
+                <Award color={challengeCompleted ? '#10b981' : '#00f2fe'} size={20} aria-hidden="true" />
+                <h3 id="challenge-title" style={{ fontSize: '1.1rem', color: challengeCompleted ? '#10b981' : '#fff' }}>
+                  {challengeCompleted ? "Daily Challenge Completed!" : "Recommended Daily Challenge"}
+                </h3>
+              </div>
+              <p style={{ fontSize: '0.85rem', color: 'var(--color-text-muted)', lineHeight: '1.4' }}>
+                {activeChallenge.text}
+              </p>
+              
+              <div style={{ marginTop: '1rem', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                <span className="status-pill status-loading" style={{ color: '#10b981', background: 'rgba(16, 185, 129, 0.1)', borderColor: 'rgba(16, 185, 129, 0.2)' }}>
+                  <TrendingDown size={12} style={{ marginRight: '0.25rem' }} aria-hidden="true" />
+                  <span>Saves {activeChallenge.offset_kg} kg CO₂</span>
+                </span>
+                
+                <button
+                  onClick={handleCompleteChallenge}
+                  disabled={challengeCompleted}
+                  className="auth-btn"
+                  style={{ 
+                    background: challengeCompleted ? 'rgba(16, 185, 129, 0.15)' : 'var(--gradient-primary)',
+                    color: challengeCompleted ? '#10b981' : '#000',
+                    border: 'none',
+                    fontWeight: 600,
+                    cursor: challengeCompleted ? 'default' : 'pointer'
+                  }}
+                  aria-label={challengeCompleted ? "Challenge is already completed" : "Mark this daily challenge as completed to reduce emissions"}
+                >
+                  {challengeCompleted ? (
+                    <div style={{ display: 'flex', alignItems: 'center', gap: '0.25rem' }}>
+                      <CheckCircle size={14} aria-hidden="true" />
+                      <span>Completed</span>
+                    </div>
+                  ) : (
+                    <span>I Did This!</span>
+                  )}
+                </button>
+              </div>
+            </article>
+          )}
+
           {/* Chat Widget */}
           <article className="chat-panel glass-panel" aria-labelledby="chat-widget-title">
             <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', marginBottom: '1.25rem' }}>
@@ -709,6 +965,220 @@ export default function Dashboard() {
           </article>
         </aside>
       </div>
+
+      {/* Carbon Baseline Profile Modal */}
+      {showProfileModal && (
+        <div className="auth-gateway" role="dialog" aria-modal="true" aria-labelledby="modal-title">
+          <div className="auth-card glass-panel" style={{ maxWidth: '600px', width: '95%', maxHeight: '90vh', overflowY: 'auto', padding: '2rem', textAlign: 'left' }}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', borderBottom: '1px solid var(--border-glass)', paddingBottom: '1rem', marginBottom: '1.5rem' }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+                <Settings color="#00f2fe" size={24} aria-hidden="true" />
+                <h2 id="modal-title" style={{ fontSize: '1.4rem' }}>Baseline Profile Setup</h2>
+              </div>
+              <button 
+                onClick={() => setShowProfileModal(false)} 
+                style={{ background: 'transparent', border: 'none', color: '#64748b', cursor: 'pointer' }}
+                aria-label="Close baseline configuration modal"
+              >
+                <X size={20} aria-hidden="true" />
+              </button>
+            </div>
+
+            <form onSubmit={handleProfileSubmit} style={{ display: 'flex', flexDirection: 'column', gap: '1.25rem' }}>
+              
+              {/* 1. Commute Profile */}
+              <fieldset style={{ border: '1px solid var(--border-glass)', borderRadius: '8px', padding: '1rem' }}>
+                <legend style={{ padding: '0 0.5rem', fontWeight: 600, color: '#00f2fe', fontSize: '0.9rem' }}>1. Commute Pattern</legend>
+                <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '1rem', marginTop: '0.5rem' }}>
+                  <div>
+                    <label htmlFor="commute-mode" style={{ fontSize: '0.8rem', color: 'var(--color-text-muted)', display: 'block', marginBottom: '0.25rem' }}>Primary Commute</label>
+                    <select 
+                      id="commute-mode"
+                      className="filter-dropdown" 
+                      style={{ width: '100%' }}
+                      value={commuteMode}
+                      onChange={(e) => setCommuteMode(e.target.value)}
+                    >
+                      <option value="walking">Walking / Running</option>
+                      <option value="car">Personal Car</option>
+                      <option value="bike">Two-Wheeler (Motorbike)</option>
+                      <option value="bus">Public Bus</option>
+                      <option value="train">Local Train</option>
+                      <option value="metro">Metro Transit</option>
+                    </select>
+                  </div>
+                  <div>
+                    <label htmlFor="vehicle-fuel" style={{ fontSize: '0.8rem', color: 'var(--color-text-muted)', display: 'block', marginBottom: '0.25rem' }}>Fuel / Engine Type</label>
+                    <select 
+                      id="vehicle-fuel"
+                      className="filter-dropdown" 
+                      style={{ width: '100%' }}
+                      value={vehicleFuel}
+                      onChange={(e) => setVehicleFuel(e.target.value)}
+                      disabled={commuteMode !== 'car' && commuteMode !== 'bike'}
+                    >
+                      <option value="petrol">Petrol</option>
+                      <option value="diesel">Diesel</option>
+                      <option value="EV">Electric (EV)</option>
+                      <option value="CNG">CNG</option>
+                    </select>
+                  </div>
+                  <div>
+                    <label htmlFor="commute-dist" style={{ fontSize: '0.8rem', color: 'var(--color-text-muted)', display: 'block', marginBottom: '0.25rem' }}>Roundtrip Distance (km)</label>
+                    <input 
+                      id="commute-dist"
+                      type="number" 
+                      min="0"
+                      className="auth-input" 
+                      style={{ width: '100%' }}
+                      value={commuteDistance}
+                      onChange={(e) => setCommuteDistance(e.target.value)}
+                    />
+                  </div>
+                  <div>
+                    <label htmlFor="commute-days" style={{ fontSize: '0.8rem', color: 'var(--color-text-muted)', display: 'block', marginBottom: '0.25rem' }}>Travel Days per Week</label>
+                    <input 
+                      id="commute-days"
+                      type="number" 
+                      min="0"
+                      max="7"
+                      className="auth-input" 
+                      style={{ width: '100%' }}
+                      value={commuteDays}
+                      onChange={(e) => setCommuteDays(e.target.value)}
+                    />
+                  </div>
+                </div>
+              </fieldset>
+
+              {/* 2. Diet Profile */}
+              <fieldset style={{ border: '1px solid var(--border-glass)', borderRadius: '8px', padding: '1rem' }}>
+                <legend style={{ padding: '0 0.5rem', fontWeight: 600, color: '#10b981', fontSize: '0.9rem' }}>2. Diet Habits</legend>
+                <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '1rem', marginTop: '0.5rem' }}>
+                  <div>
+                    <label htmlFor="diet-type" style={{ fontSize: '0.8rem', color: 'var(--color-text-muted)', display: 'block', marginBottom: '0.25rem' }}>Diet Categorization</label>
+                    <select 
+                      id="diet-type"
+                      className="filter-dropdown" 
+                      style={{ width: '100%' }}
+                      value={dietType}
+                      onChange={(e) => setDietType(e.target.value)}
+                    >
+                      <option value="vegan">Vegan</option>
+                      <option value="vegetarian">Vegetarian</option>
+                      <option value="eggetarian">Eggetarian (with Eggs)</option>
+                      <option value="non-vegetarian">Non-Vegetarian</option>
+                    </select>
+                  </div>
+                  <div>
+                    <label htmlFor="meat-freq" style={{ fontSize: '0.8rem', color: 'var(--color-text-muted)', display: 'block', marginBottom: '0.25rem' }}>Meat meals per week</label>
+                    <input 
+                      id="meat-freq"
+                      type="number" 
+                      min="0"
+                      max="21"
+                      className="auth-input" 
+                      style={{ width: '100%' }}
+                      value={meatFreq}
+                      onChange={(e) => setMeatFreq(e.target.value)}
+                      disabled={dietType !== 'non-vegetarian'}
+                    />
+                  </div>
+                </div>
+              </fieldset>
+
+              {/* 3. Cooking, Waste & Water */}
+              <fieldset style={{ border: '1px solid var(--border-glass)', borderRadius: '8px', padding: '1rem' }}>
+                <legend style={{ padding: '0 0.5rem', fontWeight: 600, color: '#d946ef', fontSize: '0.9rem' }}>3. Utility & Waste</legend>
+                <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '1rem', marginTop: '0.5rem' }}>
+                  <div>
+                    <label htmlFor="cooking-fuel" style={{ fontSize: '0.8rem', color: 'var(--color-text-muted)', display: 'block', marginBottom: '0.25rem' }}>Cooking Fuel</label>
+                    <select 
+                      id="cooking-fuel"
+                      className="filter-dropdown" 
+                      style={{ width: '100%' }}
+                      value={cookingFuel}
+                      onChange={(e) => setCookingFuel(e.target.value)}
+                    >
+                      <option value="electric_induction">Electric Induction</option>
+                      <option value="LPG">LPG Cylinder Gas</option>
+                      <option value="PNG">PNG Piped Gas</option>
+                    </select>
+                  </div>
+                  <div>
+                    <label htmlFor="house-size" style={{ fontSize: '0.8rem', color: 'var(--color-text-muted)', display: 'block', marginBottom: '0.25rem' }}>Household Size (Members)</label>
+                    <input 
+                      id="house-size"
+                      type="number" 
+                      min="1"
+                      className="auth-input" 
+                      style={{ width: '100%' }}
+                      value={householdSize}
+                      onChange={(e) => setHouseholdSize(e.target.value)}
+                    />
+                  </div>
+                  <div>
+                    <label htmlFor="water-source" style={{ fontSize: '0.8rem', color: 'var(--color-text-muted)', display: 'block', marginBottom: '0.25rem' }}>Water Source Type</label>
+                    <select 
+                      id="water-source"
+                      className="filter-dropdown" 
+                      style={{ width: '100%' }}
+                      value={waterSource}
+                      onChange={(e) => setWaterSource(e.target.value)}
+                    >
+                      <option value="municipal">Municipal / Pipeline</option>
+                      <option value="tanker">Water Tanker Delivery</option>
+                    </select>
+                  </div>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', marginTop: '1.25rem' }}>
+                    <input 
+                      id="waste-seg"
+                      type="checkbox" 
+                      style={{ transform: 'scale(1.25)', cursor: 'pointer' }}
+                      checked={wasteSegregation}
+                      onChange={(e) => setWasteSegregation(e.target.checked)}
+                    />
+                    <label htmlFor="waste-seg" style={{ fontSize: '0.85rem', color: '#fff', cursor: 'pointer' }}>Segregate Waste (Yes)</label>
+                  </div>
+                </div>
+              </fieldset>
+
+              {/* 4. Shopping Profile */}
+              <fieldset style={{ border: '1px solid var(--border-glass)', borderRadius: '8px', padding: '1rem' }}>
+                <legend style={{ padding: '0 0.5rem', fontWeight: 600, color: '#f97316', fontSize: '0.9rem' }}>4. Consumer Habits</legend>
+                <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '1rem', marginTop: '0.5rem' }}>
+                  <div>
+                    <label htmlFor="online-shopping" style={{ fontSize: '0.8rem', color: 'var(--color-text-muted)', display: 'block', marginBottom: '0.25rem' }}>Monthly Online Orders</label>
+                    <input 
+                      id="online-shopping"
+                      type="number" 
+                      min="0"
+                      className="auth-input" 
+                      style={{ width: '100%' }}
+                      value={monthlyOnlineOrders}
+                      onChange={(e) => setMonthlyOnlineOrders(e.target.value)}
+                    />
+                  </div>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+                    <ShoppingBag size={20} color="#f97316" aria-hidden="true" />
+                    <span style={{ fontSize: '0.75rem', color: 'var(--color-text-muted)' }}>Estimated carbon footprint for package delivery and courier transit.</span>
+                  </div>
+                </div>
+              </fieldset>
+
+              <button 
+                type="submit" 
+                className="submit-btn" 
+                disabled={profileSaving}
+                aria-label="Save carbon baseline details and close dialog"
+                style={{ marginTop: '1rem', background: 'var(--gradient-primary)', fontWeight: 600 }}
+              >
+                {profileSaving ? "Saving details..." : "Save Baseline Profile"}
+              </button>
+            </form>
+          </div>
+        </div>
+      )}
     </main>
   );
 }
